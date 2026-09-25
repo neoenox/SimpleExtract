@@ -16,7 +16,7 @@
 
 ### 圧縮
 - **🗜️ 圧縮タブ** - ファイル/フォルダをドロップして ZIP/7Z/TAR.GZ を作成
-- 圧縮レベル 1-9、パスワード（7Z推奨）、出力先選択
+- 圧縮レベル 1-9、パスワード（7Zのみ）、出力先選択
 
 ### 快適性
 - **アンチエイリアス** - BIZ UDGothic + ClearType + PerMonitorV2 マニフェストで滑らか
@@ -71,8 +71,8 @@ pyinstaller --windowed --onefile --name SimpleExtract-OneFile --icon=assets/icon
 
 | 拡張子 | 備考 |
 |--------|------|
-| .zip | パスワード対応 |
-| .7z | 高圧縮、パスワード対応 |
+| .zip | 解凍時パスワード対応。作成時の暗号化は未対応 |
+| .7z | 高圧縮、解凍・作成ともパスワード対応 |
 | .tar / .tar.gz / .tgz |  |
 | .gz / .bz2 | 単体圧縮 |
 | .rar | WinRAR/UnRAR 必要 |
