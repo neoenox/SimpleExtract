@@ -582,18 +582,42 @@ class AssociationManager:
         sendto = os.path.join(os.getenv("APPDATA") or "", r"Microsoft\Windows\SendTo", "SimpleExtract.lnk")
         return os.path.exists(sendto)
     @staticmethod
+    def _sendto_target_and_arguments():
+        target = sys.executable
+        if getattr(sys, 'frozen', False):
+            return target, '"%1"'
+        return target, f'"{os.path.abspath(__file__)}" "%1"'
+
+    @staticmethod
     def set_sendto(enable):
         sendto_dir = os.path.join(os.getenv("APPDATA") or "", r"Microsoft\Windows\SendTo")
         lnk = os.path.join(sendto_dir, "SimpleExtract.lnk")
         if enable:
             try:
-                exe = sys.executable if getattr(sys,'frozen',False) else sys.executable
-                # 簡易: .lnk ではなく .bat ショートカット代替は難しいので、PowerShellでlnk作成
-                ps = f'$s=(New-Object -COM WScript.Shell).CreateShortcut("{lnk}"); $s.TargetPath="{exe}"; $s.Arguments="\\"%1\\""; $s.IconLocation="{exe}"; $s.Save()'
-                subprocess.run(["powershell","-Command",ps], capture_output=True)
-                # フォールバック: exeパスを書いたtxtでも
+                exe, arguments = AssociationManager._sendto_target_and_arguments()
+
+                def ps_quote(value):
+                    return str(value).replace("'", "''")
+
+                ps = (
+                    "$s=(New-Object -COM WScript.Shell).CreateShortcut('"
+                    + ps_quote(lnk)
+                    + "'); $s.TargetPath='"
+                    + ps_quote(exe)
+                    + "'; $s.Arguments='"
+                    + ps_quote(arguments)
+                    + "'; $s.IconLocation='"
+                    + ps_quote(exe)
+                    + "'; $s.Save()"
+                )
+                subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", ps],
+                    capture_output=True,
+                    check=False,
+                )
                 if not os.path.exists(lnk):
-                    with open(lnk+".txt","w") as f: f.write(exe)
+                    with open(lnk+".txt", "w", encoding="utf-8") as f:
+                        f.write(f"{exe}\n{arguments}\n")
             except PermissionError:
                 logging.warning("SendTo ショートカットの作成に権限がありません: %s", lnk)
             except Exception as e:
@@ -606,6 +630,7 @@ class AssociationManager:
                 logging.warning("SendTo ショートカットの削除に権限がありません: %s", lnk)
             except Exception as e:
                 logging.warning("SendTo ショートカット削除中にエラー: %s", e)
+
 
 # ── Extractor ──
 class Extractor:
@@ -656,7 +681,12 @@ class Extractor:
                         raise
                     raise
             elif lower.endswith((".tar",".tar.gz",".tgz")) or lower.endswith(".gz") or lower.endswith(".bz2"):
-                if lower.endswith(".gz") and not lower.endswith(".tar.gz") and not lower.endswith(".tgz"):
+                if (
+                    (lower.endswith(".gz") and not lower.endswith(".tar.gz") and not lower.endswith(".tgz"))
+                    or lower.endswith(".bz2")
+                ):
+                    # standalone gzip/bzip2は事前に完全な展開サイズを得られない。
+                    # extract() 側でZIPBOMB_MAX_UNCOMPRESSEDを実測バイト数に適用する。
                     results.append((pathlib.Path(archive_path).stem, os.path.getsize(archive_path), False, None, False))
                 else:
                     with tarfile.open(archive_path,'r:*') as tf:
@@ -684,27 +714,30 @@ class Extractor:
         try:
             if lower.endswith(".zip"):
                 with zipfile.ZipFile(archive_path,'r') as zf:
-                    # パスワードが必要な場合はtry
-                    try:
-                        data = zf.read(inner_path, pwd=password.encode('utf-8') if password else None)
-                    except RuntimeError:
-                        if password: data = zf.read(inner_path, pwd=password.encode('utf-8'))
-                        else: raise
-                    return data[:max_bytes], None
+                    pwd = password.encode('utf-8') if password else None
+                    with zf.open(inner_path, 'r', pwd=pwd) as member:
+                        return member.read(max_bytes), None
             elif lower.endswith(".7z"):
                 if not _ensure_py7zr(): return None, "py7zr未インストール"
-                # py7zrは単一ファイル抽出が一括なので一時フォルダに展開
                 import tempfile
                 tmp = tempfile.mkdtemp()
                 try:
                     import py7zr
                     with py7zr.SevenZipFile(archive_path, mode='r', password=password) as z:
-                        # 対象のみ抽出
+                        matched = next((item for item in z.list() if item.filename == inner_path), None)
+                        if matched is None:
+                            return None, "プレビュー対象が見つかりません"
+                        uncompressed = int(getattr(matched, 'uncompressed', 0) or 0)
+                        if uncompressed > max_bytes:
+                            return None, (
+                                f"プレビュー上限を超えています "
+                                f"({human_size(uncompressed)} > {human_size(max_bytes)})"
+                            )
+                        # py7zrにはmember stream APIがないため、上限内の対象だけ一時展開する。
                         z.extract(path=tmp, targets=[inner_path])
                     fp = os.path.join(tmp, inner_path)
                     if os.path.exists(fp):
                         with open(fp, 'rb') as f: return f.read(max_bytes), None
-                    # 別パスで探す
                     for root,_,files in os.walk(tmp):
                         for fn in files:
                             fp2=os.path.join(root,fn)
@@ -719,8 +752,8 @@ class Extractor:
                 import rarfile
                 with rarfile.RarFile(archive_path) as rf:
                     if password: rf.setpassword(password)
-                    data = rf.read(inner_path)
-                    return data[:max_bytes], None
+                    with rf.open(inner_path) as member:
+                        return member.read(max_bytes), None
             elif lower.endswith((".tar",".tar.gz",".tgz")):
                 with tarfile.open(archive_path,'r:*') as tf:
                     m=tf.getmember(inner_path)
@@ -730,6 +763,7 @@ class Extractor:
         except Exception as e:
             return None, str(e)
         return None, "未対応"
+
 
     @staticmethod
     def extract(archive_path, dest_dir, password, progress_cb, log_cb):
@@ -854,10 +888,19 @@ class Extractor:
                                 return False,"キャンセルされました"
                             chunk=fin.read(1024*1024)
                             if not chunk: break
+                            done += len(chunk)
+                            if done > Extractor.ZIPBOMB_MAX_UNCOMPRESSED:
+                                try:
+                                    fout.close()
+                                    os.remove(out_path)
+                                except Exception:
+                                    pass
+                                return False, (
+                                    f"展開後のサイズが大きすぎます "
+                                    f"({human_size(done)} > {human_size(Extractor.ZIPBOMB_MAX_UNCOMPRESSED)}) - 中止しました"
+                                )
                             fout.write(chunk)
-                            done+=len(chunk)
                             if progress_cb and total>0:
-                                # 圧縮サイズ基準なので概算
                                 progress_cb(min(99, int(done/total*100)))
                 progress_cb(100)
             elif lower.endswith(".bz2"):
@@ -865,6 +908,7 @@ class Extractor:
                 out_name=pathlib.Path(archive_path).stem or "output"
                 out_path=os.path.join(dest_dir,out_name)
                 log_cb(f"展開中: {out_name}")
+                done=0
                 with bz2.open(archive_path,'rb') as fin:
                     with open(out_path,'wb') as fout:
                         while True:
@@ -874,6 +918,17 @@ class Extractor:
                                 return False,"キャンセルされました"
                             chunk=fin.read(1024*1024)
                             if not chunk: break
+                            done += len(chunk)
+                            if done > Extractor.ZIPBOMB_MAX_UNCOMPRESSED:
+                                try:
+                                    fout.close()
+                                    os.remove(out_path)
+                                except Exception:
+                                    pass
+                                return False, (
+                                    f"展開後のサイズが大きすぎます "
+                                    f"({human_size(done)} > {human_size(Extractor.ZIPBOMB_MAX_UNCOMPRESSED)}) - 中止しました"
+                                )
                             fout.write(chunk)
                 progress_cb(100)
             elif lower.endswith(".rar"):
@@ -919,6 +974,8 @@ class Compressor:
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
         try:
             if fmt == "zip":
+                if password:
+                    return False, "ZIPのパスワード付き圧縮は未対応です。暗号化する場合は7Zを選択してください"
                 # level 1-9 -> compresslevel
                 comp_level = {1:1, 3:3, 5:6, 7:7, 9:9}.get(level, 6)
                 with zipfile.ZipFile(output_path, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=comp_level) as zf:
@@ -937,9 +994,6 @@ class Compressor:
                             if log_cb: log_cb(f"追加: {arc}")
                             zf.write(f, arc)
                         if progress_cb: progress_cb(int((i+1)/total*100))
-                # ZIPパスワードは標準zipfileでは弱い暗号のみ。7zを推奨
-                if password and log_cb:
-                    log_cb("注意: ZIPパスワードは7Z形式を推奨（ZIPは弱い暗号）")
             elif fmt == "7z":
                 if not _ensure_py7zr(): return False, "py7zr未インストール"
                 if log_cb: log_cb(f"7z作成中: {output_path}")
@@ -970,8 +1024,7 @@ class Compressor:
             return False, str(e)
 
 class UpdateChecker:
-    URL = "https://api.github.com/repos/simpleextract/simpleextract/releases/latest"
-    # フォールバック: ローカルバージョンチェック用（実際はGitHubに置き換え）
+    URL = "https://api.github.com/repos/neoenox/SimpleExtract/releases/latest"
     @staticmethod
     def check(current_version, silent=False, callback=None):
         def worker():
@@ -990,14 +1043,11 @@ class UpdateChecker:
                             return
                     if callback: callback(False, current_version, "", "")
             except urllib.error.HTTPError as e:
-                if e.code == 404:
-                    # リポジトリ未作成時は更新なし扱い
-                    if callback: callback(False, current_version, "", "")
-                else:
-                    if not silent and callback: callback(None, current_version, "", str(e))
+                if callback:
+                    callback(None, current_version, "", f"HTTP {e.code}: {e.reason}")
             except Exception as e:
-                if not silent and callback: callback(None, current_version, "", str(e))
-                elif callback and silent: callback(False, current_version, "", "")
+                if callback:
+                    callback(None, current_version, "", str(e))
         threading.Thread(target=worker, daemon=True).start()
 
 # ── Association Window ──
@@ -1421,7 +1471,7 @@ class SimpleExtractApp(TkinterDnD.Tk):
         ctk.CTkLabel(lvl_row, text="最高圧縮", font=("BIZ UDGothic",9), text_color=C["SUB"]).pack(side="right")
         self.c_level_var.trace_add("write", lambda *_: self.c_level_label.configure(text=f"{self.c_level_var.get()} / 9"))
 
-        ctk.CTkLabel(c_right, text="パスワード（7Z推奨）", font=("BIZ UDGothic",11,"bold"), text_color=C["TEXT"]).pack(anchor="w", padx=14, pady=(8,2))
+        ctk.CTkLabel(c_right, text="パスワード（7Zのみ）", font=("BIZ UDGothic",11,"bold"), text_color=C["TEXT"]).pack(anchor="w", padx=14, pady=(8,2))
         self.c_pw_entry=ctk.CTkEntry(c_right, placeholder_text="任意", show="*", font=("BIZ UDGothic",11), height=32, border_color=C["BORDER"])
         self.c_pw_entry.pack(fill="x", padx=14, pady=2)
 
@@ -2022,7 +2072,11 @@ class SimpleExtractApp(TkinterDnD.Tk):
             if not messagebox.askyesno("確認", f"既に存在します。上書きしますか？\n{out}"): return
         level=self.c_level_var.get(); pw=self.c_pw_entry.get().strip() or None
         if fmt=="zip" and pw:
-            if not messagebox.askyesno("注意", "ZIPのパスワードは弱い暗号です。7Zを推奨します。\n続行しますか？"): return
+            messagebox.showerror(
+                "未対応",
+                "ZIPのパスワード付き圧縮は現在未対応です。\n暗号化する場合は7Zを選択してください。",
+            )
+            return
         self.is_compressing=True; Compressor.cancel_flag.clear()
         self.c_btn_compress.configure(state="disabled", text="圧縮中..."); self.c_progress.set(0); self.c_set_status("圧縮中...")
         self.c_progress_detail.configure(text="準備中...")
