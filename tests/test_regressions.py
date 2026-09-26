@@ -2,6 +2,7 @@ import bz2
 import gzip
 import os
 import tempfile
+import tarfile
 import unittest
 import zipfile
 from pathlib import Path
@@ -74,6 +75,73 @@ class SecurityRegressionTests(unittest.TestCase):
             self.assertFalse(ok)
             self.assertIn("大きすぎます", error)
             self.assertFalse((dest / "large").exists())
+
+
+    def test_tar_rejects_symlink_hardlink_and_special_members(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp) / "unsafe.tar"
+            dest = Path(tmp) / "out"
+
+            with tarfile.open(archive, "w") as tf:
+                regular = tarfile.TarInfo("safe.txt")
+                payload = b"safe"
+                regular.size = len(payload)
+                import io
+                tf.addfile(regular, io.BytesIO(payload))
+
+                symlink = tarfile.TarInfo("unsafe-link")
+                symlink.type = tarfile.SYMTYPE
+                symlink.linkname = "../../outside.txt"
+                tf.addfile(symlink)
+
+                hardlink = tarfile.TarInfo("unsafe-hardlink")
+                hardlink.type = tarfile.LNKTYPE
+                hardlink.linkname = "../../outside.txt"
+                tf.addfile(hardlink)
+
+                fifo = tarfile.TarInfo("unsafe-fifo")
+                fifo.type = tarfile.FIFOTYPE
+                tf.addfile(fifo)
+
+            messages = []
+            ok, error = simple_extract.Extractor.extract(
+                str(archive),
+                str(dest),
+                None,
+                lambda _value: None,
+                messages.append,
+            )
+
+            self.assertTrue(ok, error)
+            self.assertEqual("safe", (dest / "safe.txt").read_text(encoding="utf-8"))
+            self.assertFalse((dest / "unsafe-link").exists())
+            self.assertFalse((dest / "unsafe-hardlink").exists())
+            self.assertFalse((dest / "unsafe-fifo").exists())
+            self.assertGreaterEqual(
+                sum("安全でないTARメンバー" in message for message in messages),
+                3,
+            )
+
+    def test_tar_keeps_normal_directories(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp) / "dirs.tar"
+            dest = Path(tmp) / "out"
+
+            with tarfile.open(archive, "w") as tf:
+                directory = tarfile.TarInfo("folder")
+                directory.type = tarfile.DIRTYPE
+                tf.addfile(directory)
+
+            ok, error = simple_extract.Extractor.extract(
+                str(archive),
+                str(dest),
+                None,
+                lambda _value: None,
+                lambda _message: None,
+            )
+
+            self.assertTrue(ok, error)
+            self.assertTrue((dest / "folder").is_dir())
 
     def test_source_sendto_command_includes_script_path(self):
         with patch.object(simple_extract.sys, "frozen", False, create=True):
