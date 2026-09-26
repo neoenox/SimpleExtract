@@ -868,10 +868,15 @@ class Extractor:
                                         done+=len(chunk)
                                         if total_bytes>0 and progress_cb:
                                             progress_cb(int(done/total_bytes*100))
-                        else:
-                            tf.extract(m, path=dest_dir, filter='data' if sys.version_info>=(3,12) else None)
+                        elif m.isdir():
+                            os.makedirs(dest_path, exist_ok=True)
                             if progress_cb and total_bytes==0:
                                 progress_cb(int((i+1)/len(members)*100))
+                        else:
+                            # Never delegate TAR links or special files to tarfile.extract().
+                            # On Python 3.11 there is no data filter, so symlink/hardlink
+                            # link targets could otherwise escape the destination directory.
+                            log_cb(f"⚠️ スキップ（安全でないTARメンバー）: {m.name}")
             elif lower.endswith(".gz") and not lower.endswith(".tar.gz"):
                 import gzip
                 out_name=pathlib.Path(archive_path).stem or "output"
