@@ -868,10 +868,16 @@ class Extractor:
                                         done+=len(chunk)
                                         if total_bytes>0 and progress_cb:
                                             progress_cb(int(done/total_bytes*100))
-                        else:
-                            tf.extract(m, path=dest_dir, filter='data' if sys.version_info>=(3,12) else None)
+                        elif m.isdir():
+                            os.makedirs(dest_path, exist_ok=True)
                             if progress_cb and total_bytes==0:
                                 progress_cb(int((i+1)/len(members)*100))
+                        else:
+                            # Python 3.11 では tarfile.extract(..., filter=None) が
+                            # symlink/hardlink/device/FIFO 等を十分に制限しない。
+                            # 通常ファイルとディレクトリ以外は fail-closed で展開しない。
+                            kind = "symlink" if m.issym() else "hardlink" if m.islnk() else "special"
+                            log_cb(f"⚠️ スキップ（安全でないTARメンバー: {kind}）: {m.name}")
             elif lower.endswith(".gz") and not lower.endswith(".tar.gz"):
                 import gzip
                 out_name=pathlib.Path(archive_path).stem or "output"
