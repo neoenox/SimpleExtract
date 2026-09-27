@@ -1,7 +1,9 @@
 import bz2
 import gzip
+import io
 import os
 import tempfile
+import tarfile
 import unittest
 import zipfile
 from pathlib import Path
@@ -74,6 +76,40 @@ class SecurityRegressionTests(unittest.TestCase):
             self.assertFalse(ok)
             self.assertIn("大きすぎます", error)
             self.assertFalse((dest / "large").exists())
+
+    def test_tar_symlink_outside_destination_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp) / "unsafe.tar"
+            with tarfile.open(archive, "w") as tf:
+                link = tarfile.TarInfo("safe-link")
+                link.type = tarfile.SYMTYPE
+                link.linkname = "../../outside"
+                tf.addfile(link)
+            dest = Path(tmp) / "out"
+
+            ok, error = simple_extract.Extractor.extract(
+                str(archive), str(dest), None, lambda _value: None, lambda _message: None
+            )
+
+            self.assertTrue(ok, error)
+            self.assertFalse((dest / "safe-link").exists())
+
+    def test_tar_hardlink_outside_destination_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp) / "unsafe-hardlink.tar"
+            with tarfile.open(archive, "w") as tf:
+                link = tarfile.TarInfo("safe-hardlink")
+                link.type = tarfile.LNKTYPE
+                link.linkname = "../../outside"
+                tf.addfile(link)
+            dest = Path(tmp) / "out"
+
+            ok, error = simple_extract.Extractor.extract(
+                str(archive), str(dest), None, lambda _value: None, lambda _message: None
+            )
+
+            self.assertTrue(ok, error)
+            self.assertFalse((dest / "safe-hardlink").exists())
 
     def test_source_sendto_command_includes_script_path(self):
         with patch.object(simple_extract.sys, "frozen", False, create=True):
