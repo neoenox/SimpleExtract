@@ -115,6 +115,44 @@ FONT_FALLBACK = "Meiryo UI"
 
 # --- システム設定の保存/復元 ---
 _original_font_settings = {}  # enable_font_antialiasing で変更前の値を保存
+_font_settings_captured = False
+
+def _read_original_font_settings():
+    """現在のフォント関連設定を副作用なしで読み取る。"""
+    settings = {}
+    SPI_GETFONTSMOOTHING = 0x004A
+    SPI_GETFONTSMOOTHINGTYPE = 0x200A
+    try:
+        buf = ctypes.wintypes.DWORD()
+        ctypes.windll.user32.SystemParametersInfoW(
+            SPI_GETFONTSMOOTHING, 0, ctypes.byref(buf), 0)
+        settings["font_smoothing"] = buf.value
+    except Exception:
+        pass
+    try:
+        buf = ctypes.wintypes.DWORD()
+        ctypes.windll.user32.SystemParametersInfoW(
+            SPI_GETFONTSMOOTHINGTYPE, 0, ctypes.byref(buf), 0)
+        settings["font_smoothing_type"] = buf.value
+    except Exception:
+        pass
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\Desktop", 0,
+                            winreg.KEY_READ) as k:
+            settings["reg_FontSmoothing"], _ = winreg.QueryValueEx(k, "FontSmoothing")
+            settings["reg_FontSmoothingType"], _ = winreg.QueryValueEx(k, "FontSmoothingType")
+    except Exception:
+        pass
+    return settings
+
+def _capture_original_font_settings_once():
+    """システム設定を書き換える前の値をプロセス中1回だけ保持する。"""
+    global _font_settings_captured
+    if _font_settings_captured:
+        return
+    # 読み取りが一部/全部失敗しても、変更後の値を「元設定」として再取得しない。
+    _font_settings_captured = True
+    _original_font_settings.update(_read_original_font_settings())
 
 def _restore_font_settings():
     """アプリ起動前に保存したフォント関連のシステム設定を復元する。"""
@@ -161,23 +199,8 @@ def enable_font_antialiasing(root=None):
     FE_FONTSMOOTHINGCLEARTYPE = 0x0002
     SPIF_UPDATEINIFILE = 0x01
     SPIF_SENDCHANGE = 0x02
-    # --- 変更前の値を保存 ---
-    try:
-        buf = ctypes.wintypes.DWORD()
-        ctypes.windll.user32.SystemParametersInfoW(SPI_SETFONTSMOOTHING, 0, ctypes.byref(buf), 0)
-        _original_font_settings["font_smoothing"] = buf.value
-    except Exception: pass
-    try:
-        buf = ctypes.wintypes.DWORD()
-        ctypes.windll.user32.SystemParametersInfoW(SPI_SETFONTSMOOTHINGTYPE, 0, ctypes.byref(buf), 0)
-        _original_font_settings["font_smoothing_type"] = buf.value
-    except Exception: pass
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\Desktop", 0,
-                            winreg.KEY_READ) as k:
-            _original_font_settings["reg_FontSmoothing"], _ = winreg.QueryValueEx(k, "FontSmoothing")
-            _original_font_settings["reg_FontSmoothingType"], _ = winreg.QueryValueEx(k, "FontSmoothingType")
-    except Exception: pass
+    # --- 変更前の値を保存（初回だけ） ---
+    _capture_original_font_settings_once()
     # 1. DPI Awareness - PerMonitor (1) の方が分数スケーリングでギザつきにくい
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(1)  # PROCESS_SYSTEM_DPI_AWARE
